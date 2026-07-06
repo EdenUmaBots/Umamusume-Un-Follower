@@ -1,0 +1,8 @@
+frida==17.9.1
+msgpack==1.1.0
+curl_cffi==0.7.4
+pycryptodome==3.14.1
+
+# Optional -- crisper logo scaling in the UI + exe icon (make_icon.py). Without
+# it the logo falls back to tk's integer downscale, which still works.
+# pillow>=10

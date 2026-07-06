@@ -1,0 +1,19 @@
+# Captured data -- contains your REAL account auth (account.json: viewer_id,
+# auth_key, steam ticket) and real viewer ids (followers.json). NEVER commit.
+follower_data/
+
+# Build output
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+Thumbs.db
+.DS_Store
