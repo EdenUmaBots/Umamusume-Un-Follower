@@ -65,6 +65,10 @@ Then:
 
 ---
 
+## 🧠 Video Showcase
+
+https://www.youtube.com/watch?v=wRGMfyAJXas
+
 ## 🧠 How it works
 
 ```
