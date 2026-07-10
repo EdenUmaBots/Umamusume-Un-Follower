@@ -185,11 +185,12 @@ class UmaClient:
             except (TypeError, ValueError):
                 pass
 
-        data = res.get("data", {})
-        if isinstance(data, dict):
-            srv = data.get("res_version")
-            if srv and str(srv) != str(self.res_ver):
-                self.res_ver = str(srv)
+        data = res.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        srv = data.get("res_version")
+        if srv and str(srv) != str(self.res_ver):
+            self.res_ver = str(srv)
 
         # rotate sid on EVERY response (success or error) -- the server issues the
         # next sid in data_headers; not advancing after an error 217-cascades.
@@ -197,7 +198,7 @@ class UmaClient:
             self.sid = next_sid(dh["sid"])
 
         if rc == 214 and retry_res > 0:
-            server_res = str(dh.get("resource_version") or (data or {}).get("resource_version") or "")
+            server_res = str(dh.get("resource_version") or data.get("resource_version") or "")
             if server_res and server_res != str(self.res_ver):
                 if log:
                     log(f"[RES-VER] {self.res_ver} -> {server_res} after 214; retrying")

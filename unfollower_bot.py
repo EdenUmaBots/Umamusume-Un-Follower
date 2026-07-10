@@ -17,7 +17,7 @@ Follower". Frida is used ONLY for the one-time auth grab (auth_capture.py).
 --------------------------------------------------------------------------------
 USAGE
 --------------------------------------------------------------------------------
-Run with NO arguments (or "Start Icarus Un-follower.vbs" / the exe) to open the
+Run with NO arguments (or "Start Icarus Unfollower.vbs" / the exe) to open the
 dashboard UI: pick an inactivity period + human-like delays, then Scan / Remove
 with a live log. Or from the command line:
 
@@ -293,6 +293,17 @@ def _headless_client():
     return client
 
 
+def own_follow_num(decoded):
+    """How many accounts the SERVER says you follow (friend/index own_follow_num).
+    Used to sanity-check mutual detection: if the server says you follow people
+    but we found zero follow-backs, mutual detection probably failed. None if
+    the field isn't present."""
+    data = decoded.get("data") if isinstance(decoded, dict) else None
+    if isinstance(data, dict) and isinstance(data.get("own_follow_num"), int):
+        return data["own_follow_num"]
+    return None
+
+
 def cmd_analyze(args):
     if args.days <= 0:
         print("[analyze] --days must be positive (e.g. 0.5 = 12 hours).")
@@ -300,12 +311,13 @@ def cmd_analyze(args):
     os.makedirs(DATA_DIR, exist_ok=True)
     client = _headless_client()
     res = client.friend_index()
-    entries, fields, p, score = find_follower_list(res)
+    entries, fields, p, _ = find_follower_list(res)
     if not entries:
         print("[analyze] friend/index returned no follower list.")
         return
     following = extract_following_ids(res)
-    write_reports(entries, fields, p, None, days_to_label(args.days), following)
+    write_reports(entries, fields, p, None, days_to_label(args.days), following,
+                  own_follow=own_follow_num(res))
 
 
 def classify(entries, fields, threshold_seconds, following_ids=None):
@@ -408,10 +420,44 @@ def reclassify_inactive(followers, threshold_seconds):
     return out
 
 
-def build_payload(entries, fields, path, template, period_label, following_ids=None):
+# Removals act on last-login times FROZEN into followers.json at scan time. If
+# that snapshot is stale, a follower may have logged in since yet still classify
+# as inactive, and we'd remove them permanently by mistake. So removals refuse to
+# run against an old scan and ask for a fresh one (a Scan re-fetches live data).
+MAX_REMOVAL_SCAN_AGE = 1800.0  # seconds; ~30 min is ample to review a fresh scan
+
+
+def scan_age_seconds(followers):
+    """Seconds since this followers.json snapshot was captured, or None if the
+    age is unknown (missing/invalid captured_ts)."""
+    ts = followers.get("captured_ts")
+    if not isinstance(ts, (int, float)) or ts <= 0:
+        return None
+    return max(0.0, time.time() - ts)
+
+
+def scan_is_stale(followers):
+    """True if the scan is too old (or of unknown age) to safely remove against."""
+    age = scan_age_seconds(followers)
+    return age is None or age > MAX_REMOVAL_SCAN_AGE
+
+
+def mutual_detection_suspect(followers):
+    """True when mutual detection likely FAILED: the server says you follow people
+    (own_follow_num > 0) but the scan found zero follow-backs to cross-reference,
+    so 'skip mutuals' would protect nobody. Fail loud rather than silently
+    removing mutuals. Returns False when own_follow_num is unknown (older scans)."""
+    own = followers.get("own_follow_num")
+    return isinstance(own, int) and own > 0 and not followers.get("following_count")
+
+
+def build_payload(entries, fields, path, template, period_label, following_ids=None,
+                  own_follow=None):
     """Pure: classify the captured list into a report payload (no IO, no print).
     `period_label` is a dropdown-style string ('12 hours', '3 days', '1 month').
     `following_ids` = viewer_ids you follow, used to flag mutuals.
+    `own_follow` = the server's own_follow_num, stored so removals can detect a
+    likely mutual-detection failure (you follow people but 0 follow-backs found).
     Shared by the CLI and the UI so both agree on what 'inactive' means."""
     threshold_seconds = period_to_seconds(period_label)
     inactive, active, unknown = classify(entries, fields, threshold_seconds, following_ids)
@@ -425,6 +471,7 @@ def build_payload(entries, fields, path, template, period_label, following_ids=N
         "days_threshold": round(threshold_seconds / 86400.0, 3),
         "total": len(entries),
         "following_count": len(following_ids or ()),
+        "own_follow_num": own_follow,
         "inactive": inactive,
         "active": active,
         "unknown_last_login": unknown,
@@ -487,9 +534,11 @@ def save_reports(payload, template):
     return DATA_DIR
 
 
-def write_reports(entries, fields, path, template, period_label, following_ids=None):
+def write_reports(entries, fields, path, template, period_label, following_ids=None,
+                  own_follow=None):
     """CLI convenience: build + save + print a short summary."""
-    payload = build_payload(entries, fields, path, template, period_label, following_ids)
+    payload = build_payload(entries, fields, path, template, period_label,
+                            following_ids, own_follow=own_follow)
     save_reports(payload, template)
     inactive = payload["inactive"]
     print(f"\n[analyze] wrote follower_data/followers.json + followers_report.md")
@@ -512,12 +561,21 @@ def cmd_run(args):
     if args.days <= 0:
         print("[run] --days must be positive (e.g. 0.5 = 12 hours).")
         return
-    followers = json.load(open(fj, encoding="utf-8"))
+    if args.max < 0:
+        print("[run] --max cannot be negative (0 = all, or a positive cap).")
+        return
+    with open(fj, encoding="utf-8") as f:
+        followers = json.load(f)
     inactive = reclassify_inactive(followers, args.days * 86400.0)
     candidates = [r for r in inactive if r.get("viewer_id")]
     if not args.include_mutual:
         candidates = [r for r in candidates if not r.get("mutual")]
-    cap = None if not args.max else args.max          # 0 / unset = all
+        if mutual_detection_suspect(followers):
+            print(f"[run] WARNING: the server says you follow "
+                  f"{followers.get('own_follow_num')} account(s) but the last scan "
+                  "found 0 follow-backs, so mutual detection likely failed and "
+                  "'skip mutuals' may protect nobody. Re-scan before removing.")
+    cap = None if args.max == 0 else args.max          # 0 / unset = all
     targets = [r["viewer_id"] for r in candidates][:cap]
     print(f"[run] period {days_to_label(args.days)}: {len(inactive)} inactive; "
           f"removing {len(targets)}{'' if cap is None else f' (max {cap})'}.")
@@ -526,6 +584,13 @@ def cmd_run(args):
         return
     if not (args.arm and args.yes):
         print("[run] DRY RUN -- nothing sent. Add --arm --yes to actually remove.")
+        return
+    if scan_is_stale(followers):
+        age = scan_age_seconds(followers)
+        age_txt = "of unknown age" if age is None else f"{age / 60:.0f} min old"
+        print(f"[run] the last scan is {age_txt}; removals must run against a fresh "
+              "scan so nobody who logged in since is removed by mistake. Re-run "
+              "`python unfollower_bot.py analyze --days N`, then this command again.")
         return
     client = _headless_client()
     removed = 0
@@ -848,14 +913,15 @@ class BotController:
             client = self._get_client()
             self.status(ACCENT, "scanning")
             res = client.friend_index(log=lambda m: self.log(m, "info"))
-            entries, fields, p, score = find_follower_list(res)
+            entries, fields, p, _ = find_follower_list(res)
             if not entries:
                 self.log("friend/index returned no follower list (keys: "
                          + str(list((res.get('data') or {}).keys())) + ").", "err")
                 self.status(DANGER, "no data")
                 return
             following = extract_following_ids(res)
-            payload = build_payload(entries, fields, p, None, period_label, following)
+            payload = build_payload(entries, fields, p, None, period_label, following,
+                                    own_follow=own_follow_num(res))
             save_reports(payload, None)
             self._emit_payload_stats(payload)
             n_mut = sum(1 for r in payload["inactive"] if r.get("mutual"))
@@ -881,7 +947,8 @@ class BotController:
                 self.log("No scan on file. Click Scan followers first.", "err")
                 self.status(DANGER, "no data")
                 return
-            followers = json.load(open(fj, encoding="utf-8"))
+            with open(fj, encoding="utf-8") as f:
+                followers = json.load(f)
             # Re-derive the inactive set against the CURRENTLY selected period.
             period = opts.get("period") or followers.get("period_label", "?")
             inactive = reclassify_inactive(followers, period_to_seconds(period))
@@ -908,6 +975,17 @@ class BotController:
                 self.log("DRY RUN — nothing sent. Turn on 'Arm removals' to actually "
                          "remove (start with Max = 1 to validate).", "warn")
                 self.status(FG_FAINT, "idle")
+                return
+
+            # Safety net (the UI also gates this in _on_remove): never remove
+            # against a stale snapshot — last-login times could be out of date.
+            if scan_is_stale(followers):
+                age = scan_age_seconds(followers)
+                age_txt = "of unknown age" if age is None else f"{age / 60:.0f} min old"
+                self.log(f"Refusing to remove: the scan is {age_txt}. Click Scan "
+                         "followers again so removals act on fresh last-login data.",
+                         "err")
+                self.status(DANGER, "stale scan")
                 return
 
             self.status(WARN, "connecting")
@@ -1187,15 +1265,22 @@ class UnfollowerUI(tk.Tk):
         if not self._busy:
             self._refresh_cards_from_file()
 
+    def _load_scan(self):
+        """Load the persisted followers.json, or None if absent/unreadable."""
+        fj = os.path.join(DATA_DIR, "followers.json")
+        if not os.path.exists(fj):
+            return None
+        try:
+            with open(fj, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def _refresh_cards_from_file(self, announce=False):
         """Populate the stat cards from a persisted followers.json, reclassified
         against the currently selected period. No-op if there's no scan on file."""
-        fj = os.path.join(DATA_DIR, "followers.json")
-        if not os.path.exists(fj):
-            return
-        try:
-            followers = json.load(open(fj, encoding="utf-8"))
-        except Exception:
+        followers = self._load_scan()
+        if followers is None:
             return
         inactive = reclassify_inactive(followers, period_to_seconds(self._read_period()))
         total = followers.get("total", len(_all_rows(followers)))
@@ -1213,12 +1298,6 @@ class UnfollowerUI(tk.Tk):
         except Exception:
             return default
 
-    def _read_int(self, var, default):
-        try:
-            return max(0, int(float(var.get())))
-        except Exception:
-            return default
-
     def _read_max(self):
         """Return the per-run cap, or None for 'no cap' (blank / 'all' / 0)."""
         v = (self.var_max.get() or "").strip().lower()
@@ -1232,12 +1311,8 @@ class UnfollowerUI(tk.Tk):
     def _pending_removal_count(self):
         """(count that would be removed, total inactive candidates) for the
         confirm dialog — mirrors what _run computes."""
-        fj = os.path.join(DATA_DIR, "followers.json")
-        if not os.path.exists(fj):
-            return 0, 0
-        try:
-            followers = json.load(open(fj, encoding="utf-8"))
-        except Exception:
+        followers = self._load_scan()
+        if followers is None:
             return 0, 0
         inactive = reclassify_inactive(followers, period_to_seconds(self._read_period()))
         cands = [r for r in inactive if r.get("viewer_id")]
@@ -1271,17 +1346,43 @@ class UnfollowerUI(tk.Tk):
             "arm": self.chip_arm.active,
         }
         if opts["arm"]:
+            followers = self._load_scan()
+            if followers is None:
+                messagebox.showwarning(
+                    APP_SHORT, "No scan on file yet — click Scan followers first.")
+                return
+            # Removals act on last-login times captured at scan time; block if that
+            # snapshot is stale so nobody who logged in since is removed by mistake.
+            if scan_is_stale(followers):
+                age = scan_age_seconds(followers)
+                age_txt = "of unknown age" if age is None else f"{int(age // 60)} min old"
+                messagebox.showwarning(
+                    APP_SHORT,
+                    f"The last scan is {age_txt}. To avoid removing someone who has "
+                    "logged in since, click Scan followers again, then Remove.")
+                return
             count, total = self._pending_removal_count()
             est_min = round(count * (dmin + dmax) / 2 / 60, 1)
+            age = scan_age_seconds(followers)
+            age_txt = ("just now" if (age is not None and age < 60)
+                       else "unknown" if age is None else f"{int(age // 60)} min ago")
+            warn_line = ""
+            if not opts["include_mutual"] and mutual_detection_suspect(followers):
+                warn_line = ("⚠️ Mutual detection looks unreliable (server says you "
+                             f"follow {followers.get('own_follow_num')} but 0 follow-backs "
+                             "were found) — mutuals may NOT be protected.\n")
             if not messagebox.askyesno(
                     APP_SHORT,
                     f"Arm is ON — this permanently removes followers via the server.\n\n"
                     f"Inactivity period: {period}\n"
+                    f"Scanned: {age_txt}\n"
                     f"Will remove: {count} of {total} inactive"
                     f"{' (capped)' if opts['max_n'] is not None else ' (ALL)'}\n"
                     f"{'Skipping' if not opts['include_mutual'] else 'INCLUDING'} mutuals\n"
-                    f"Pacing: {dmin:g}-{dmax:g}s each  (~{est_min} min total)\n\n"
-                    "You can press Stop any time. Continue?"):
+                    f"Pacing: {dmin:g}-{dmax:g}s each  (~{est_min} min total)\n"
+                    f"{warn_line}\n"
+                    "You can press Stop any time. Continue?",
+                    default=messagebox.NO, icon=messagebox.WARNING):
                 return
         self.controller.start_run(opts)
 

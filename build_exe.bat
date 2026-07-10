@@ -6,7 +6,11 @@ rem ---------------------------------------------------------------------------
 cd /d "%~dp0"
 
 echo Installing build tooling (pyinstaller + runtime deps)...
-python -m pip install --upgrade pyinstaller frida msgpack curl_cffi pycryptodome
+python -m pip install --upgrade pyinstaller
+if errorlevel 1 goto err
+rem Install runtime deps from the PINNED requirements.txt so the exe is built
+rem against the same tested versions as `pip install -r requirements.txt` users.
+python -m pip install -r requirements.txt
 if errorlevel 1 goto err
 
 rem Use the winged logo as the exe icon if it's been converted (see make_icon.py)

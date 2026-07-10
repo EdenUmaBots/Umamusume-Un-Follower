@@ -2,7 +2,8 @@
 launcher.py -- plug-and-play bootstrapper for Icarus Un-follower.
 
 Double-click "Start Icarus Unfollower.vbs" (or run this with pythonw) and it will:
-  1. make sure frida + msgpack are installed (pip-installing them if not),
+  1. make sure frida, msgpack, curl_cffi and pycryptodome are installed
+     (pip-installing them if not),
   2. open the Icarus Un-follower dashboard,
 all without you touching a command prompt. Any problem is shown in a small
 Windows dialog instead of a console you can't see.

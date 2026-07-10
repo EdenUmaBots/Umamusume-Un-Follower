@@ -1,6 +1,7 @@
 """
-make_icon.py -- convert assets/icarus.png into assets/icarus.ico so the built
-Icarus.exe carries the winged logo as its file/taskbar icon.
+make_icon.py -- convert assets/Icarus_logo.png (any assets/icarus*.png) into
+assets/icarus.ico so the built IcarusUnfollower.exe carries the winged logo as
+its file/taskbar icon.
 
     python make_icon.py
 

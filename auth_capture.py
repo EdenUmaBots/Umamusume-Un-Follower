@@ -290,7 +290,8 @@ def load_config(path=CONFIG_PATH):
     if not os.path.exists(path):
         return None
     try:
-        return json.load(open(path, encoding="utf-8"))
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return None
 
